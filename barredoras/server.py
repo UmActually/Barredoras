@@ -1,6 +1,6 @@
 import mesa
 
-from .model import Habitacion, RobotLimpieza, Celda, Mueble
+from .model import Habitacion, RobotLimpieza, Celda, Mueble, EstacionCarga
 
 MAX_NUMBER_ROBOTS = 20
 
@@ -11,7 +11,7 @@ def agent_portrayal(agent):
                 "text": f"{agent.carga}", "text_color": "black"}
     elif isinstance(agent, Mueble):
         return {"Shape": "rect", "Filled": "true", "Color": "black", "Layer": 0,
-                "w": 0.9, "h": 0.9}
+                "w": 0.9, "h": 0.9, "text": "🛋"}
     elif isinstance(agent, Celda):
         portrayal = {"Shape": "rect", "Filled": "true", "Layer": 0, "w": 0.9, "h": 0.9, "text_color": "Black"}
         if agent.sucia:
@@ -21,6 +21,9 @@ def agent_portrayal(agent):
             portrayal["Color"] = "white"
             portrayal["text"] = ""
         return portrayal
+    elif isinstance(agent, EstacionCarga):
+        return {"Shape": "rect", "Filled": "true", "Color": "green", "Layer": 0,
+                "w": 0.9, "h": 0.9, "text": "⚡"}
 
 
 grid = mesa.visualization.CanvasGrid(
