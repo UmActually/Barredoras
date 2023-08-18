@@ -7,7 +7,6 @@ from mesa.datacollection import DataCollector
 import numpy as np
 import random
 
-
 class Celda(Agent):
     def __init__(self, unique_id, model, suciedad: bool = False):
         super().__init__(unique_id, model)
@@ -25,11 +24,12 @@ class EstacionCarga(Agent):
 
     def step(self) -> None:
         # Check if there is a robot in the same position
-        robots = self.model.grid.get_cell_list_contents([self.pos])
-        if len(robots) > 0:
-            for r in robots:
-                if isinstance(r, RobotLimpieza):
-                    r.recarga()
+        # robots = self.model.grid.get_cell_list_contents([self.pos])
+        # if len(robots) > 0:
+        #     for r in robots:
+        #         if isinstance(r, RobotLimpieza):
+        #             r.recarga()
+        pass
                     
 
 class RobotLimpieza(Agent):
@@ -76,13 +76,10 @@ class RobotLimpieza(Agent):
 
     def step(self):
         # Obtener vecinos 
-        vecinos = self.model.grid.get_neighbors(
-            self.pos, moore=True, include_center=False)
-
-        # Eliminar muebles y otros robots de la lista de vecinos
-        for vecino in vecinos:
-            if isinstance(vecino, (Mueble, RobotLimpieza)):
-                vecinos.remove(vecino)
+        vecinos = list(filter(
+            lambda vecino: not isinstance(vecino, Mueble | RobotLimpieza),
+            self.model.grid.get_neighbors(
+            self.pos, moore=True, include_center=False)))
 
         # Buscar estaciones de carga
         estaciones_carga = self.buscar_estacion_carga(vecinos)
@@ -104,23 +101,28 @@ class RobotLimpieza(Agent):
             if len(self.camino) > 0:
                 self.sig_pos = self.camino.pop()
                 return
-            elif self.carga == 100:
+            if self.carga >= 100:
                 self.estado = 'limpiando'
                 self.camino = []
-                self.sig_pos = None
+                self.sig_pos = self.seleccionar_nueva_pos(vecinos)
+                return
             else:
                 self.sig_pos = self.pos
                 return
 
         distancia_estacion = np.inf
-        for estacion in self.estaciones_carga:
-            # TODO: Calcular camino a estacion y comparar distancia con bateria
-            camino = self.calcula_camino(estacion)
-            if len(camino) < distancia_estacion:
-                distancia_estacion = len(camino)
+
+        caminos = {}
+        camino = []
+        if len(self.estaciones_carga) > 0:
+            caminos = self.calcula_caminos(self.estaciones_carga)
+            for c in caminos.values():
+                if len(c) < distancia_estacion:
+                    distancia_estacion = len(c)
+                    camino = c
         
         # Va a la estacion de carga si la distancia es igual a la carga
-        if distancia_estacion == self.carga:
+        if len(estaciones_carga) and self.carga - distancia_estacion < 10:
             # Ir a estacion de carga
             self.estado = 'recargando'
             self.camino = camino
@@ -137,13 +139,23 @@ class RobotLimpieza(Agent):
     def advance(self):
         if self.pos != self.sig_pos:
             self.movimientos += 1
-
-        if self.carga > 0:
-            self.carga -= 1
-            self.model.grid.move_agent(self, self.sig_pos)
+        
+        estacion = self.model.grid.get_cell_list_contents([self.pos])
+        if len(estacion) > 0:
+            for e in estacion:
+                if isinstance(e, EstacionCarga):
+                    self.recarga()
+                    break
+            else:
+                if self.carga > 0:
+                    self.carga -= 1
+                    self.model.grid.move_agent(self, self.sig_pos)
 
     def recarga(self):
-        self.carga += 25
+        if self.carga >= 100:
+            return
+        else:
+            self.carga += 25
         
     def enviar_mensaje(self, mensaje):
         self.mensajes.append(mensaje)
@@ -156,13 +168,65 @@ class RobotLimpieza(Agent):
             if isinstance(robot, RobotLimpieza):
                 robot.enviar_mensaje(mensaje)
 
-    def calcula_camino(self, pos):
+    def casilla_menor_costo(self, posiciones_no_visitadas, costos):
+        costo_actual = np.inf
+        pos = None
+
+        for posicion in posiciones_no_visitadas:
+            if costos[posicion] < costo_actual:
+                costo_actual = costos[posicion]
+                pos = posicion
+
+        return pos
+
+    def calcula_caminos(self, posiciones):
         """
         Calcula el camino más corto desde la posición actual hasta la posición
         indicada. Devuelve una lista de posiciones que representan el camino.
         """
-        # TODO: Implementar algoritmo de búsqueda de camino
+        # Djisktra in python
+        posiciones_no_visitadas = [pos for agent, pos in self.model.grid.coord_iter() if not isinstance(agent, Mueble)]
+        posiciones2 = posiciones.copy()
+        costos = {pos: np.inf for pos in posiciones_no_visitadas}
+        costos[self.pos] = 0
+        pos_actual = self.pos
 
+        while len(posiciones_no_visitadas) > 0:
+            print(pos_actual)
+            vecinos = self.model.grid.get_neighbors(
+                pos_actual, moore=True, include_center=False)
+            for vecino in vecinos:
+                if isinstance(vecino, Mueble):
+                    continue
+                if costos[vecino.pos] > costos[pos_actual] + 1:
+                    costos[vecino.pos] = costos[pos_actual] + 1
+            posiciones_no_visitadas.remove(pos_actual)
+            
+            if pos_actual in posiciones2:
+                posiciones2.remove(pos_actual)
+                
+                if len(posiciones2) == 0:
+                    break
+            pos_actual = self.casilla_menor_costo(posiciones_no_visitadas, costos)
+            if pos_actual is None:
+                break
+        
+        caminos = {}
+
+        for pos in posiciones:
+            camino = []
+            pos_actual = pos
+            while pos_actual != self.pos:
+                camino.append(pos_actual)
+                vecinos = self.model.grid.get_neighbors(
+                    pos_actual, moore=True, include_center=False)
+                for vecino in vecinos:
+                    if costos[vecino.pos] == costos[pos_actual] - 1:
+                        pos_actual = vecino.pos
+                        break
+            caminos[pos] = camino
+
+        return caminos
 
 
 class Habitacion(Model):
@@ -193,6 +257,7 @@ class Habitacion(Model):
             if row < M / 2 and col < N / 2 and not estaciones_creadas[0]:
                 estacion_carga = EstacionCarga(int(f"{num_agentes}{id_}") + 1, self)
                 self.grid.place_agent(estacion_carga, pos)
+                self.schedule.add(estacion_carga)
                 estaciones_creadas[0] = True
                 posiciones_disponibles.remove(pos)
             elif row < M / 2 and col >= N / 2 and not estaciones_creadas[1]:
@@ -279,7 +344,7 @@ def get_grid(model: Model) -> np.ndarray:
 
 
 def get_cargas(model: Model):
-    return [(agent.unique_id, agent.carga) for agent in model.schedule.agents]
+    return [(agent.unique_id, agent.carga) for agent in model.schedule.agents if isinstance(agent, RobotLimpieza)]
 
 
 def get_sucias(model: Model) -> int:
