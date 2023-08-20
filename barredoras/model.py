@@ -75,6 +75,7 @@ class RobotLimpieza(Agent):
     # def buscar_estacion_carga(estacionesCarga):
 
     def step(self):
+        print(self.pos, self.carga, self.estado)
         # Obtener vecinos 
         vecinos = list(filter(
             lambda vecino: not isinstance(vecino, Mueble | RobotLimpieza),
@@ -121,8 +122,10 @@ class RobotLimpieza(Agent):
                     distancia_estacion = len(c)
                     camino = c
         
+        print(distancia_estacion, len(self.estaciones_carga))
         # Va a la estacion de carga si la distancia es igual a la carga
-        if len(estaciones_carga) and self.carga - distancia_estacion < 10:
+        if len(self.estaciones_carga) and self.carga - distancia_estacion < 10:
+            print('recargando')
             # Ir a estacion de carga
             self.estado = 'recargando'
             self.camino = camino
@@ -149,7 +152,9 @@ class RobotLimpieza(Agent):
             else:
                 if self.carga > 0:
                     self.carga -= 1
-                    self.model.grid.move_agent(self, self.sig_pos)
+            if self.sig_pos and self.sig_pos != self.pos:
+                self.model.grid.move_agent(self, self.sig_pos)
+            # self.model.grid.move_agent(self, self.sig_pos)
 
     def recarga(self):
         if self.carga >= 100:
@@ -192,7 +197,7 @@ class RobotLimpieza(Agent):
         pos_actual = self.pos
 
         while len(posiciones_no_visitadas) > 0:
-            print(pos_actual)
+            # print(pos_actual)
             vecinos = self.model.grid.get_neighbors(
                 pos_actual, moore=True, include_center=False)
             for vecino in vecinos:
