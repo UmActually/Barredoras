@@ -8,6 +8,7 @@ from mesa.space import MultiGrid
 from mesa.time import SimultaneousActivation
 from mesa.datacollection import DataCollector
 import numpy as np
+import time
 
 
 NO_ROBOT_OVERLAP = True
@@ -54,6 +55,7 @@ class RobotLimpieza(Agent):
         self.estado = 'limpiando'  # limpiando, recargando
         self.camino = []
         self.celdas_visitadas = [False for _ in range(self.model.grid.width * self.model.grid.height)]
+        
 
     def step(self) -> None:
         if all(self.celdas_visitadas):
@@ -138,6 +140,17 @@ class RobotLimpieza(Agent):
             self.movimientos += 1
             self.model.grid.move_agent(self, self.sig_pos)
             self.broadcast('marcar_celda', self.pos)
+            
+            self.model.total_movements += 1
+        
+        if all(isinstance(agent, RobotLimpieza) and agent.celdas_visitadas.count(True) == self.num_celdas_sucias for agent in self.model.schedule.agents):
+            # Calculate cleaning time in seconds
+            cleaning_time = self.model.end_time - self.model.start_time
+            
+            # Send cleaning time to the chart
+            self.model.message_bus.send("chart_tiempo_limpieza", cleaning_time)
+
+
 
     def analizar_vecinos(self) -> Vecinos:
         vecinos = {
@@ -188,7 +201,9 @@ class RobotLimpieza(Agent):
     def recarga(self) -> None:
         if self.carga >= 100:
             return
+        
         self.carga += min(100 - self.carga, 25)
+
 
     def enviar_mensaje(self, mensaje, contenido) -> None:
         self.mensajes.append((mensaje, contenido))
@@ -276,9 +291,15 @@ class Habitacion(Model):
         self.num_agentes = num_agentes
         self.porc_celdas_sucias = porc_celdas_sucias
         self.porc_muebles = porc_muebles
+        
+        self.total_movements = 0
 
         self.grid = MultiGrid(rows, cols, False)
         self.schedule = SimultaneousActivation(self)
+        
+        self.start_time = None
+        self.end_time = None
+        self.cleaning_finished = False
 
         posiciones_disponibles = [pos for _, pos in self.grid.coord_iter()]
         self.random.shuffle(posiciones_disponibles)
@@ -346,10 +367,20 @@ class Habitacion(Model):
 
         self.datacollector = DataCollector(
             model_reporters={"Grid": get_grid, "Cargas": get_cargas,
-                             "CeldasSucias": get_sucias},
+                             "CeldasSucias": get_sucias,
+                             "Movimientos": get_movements},
         )
 
     def step(self) -> None:
+        
+        # Start the timer when the first robot starts cleaning
+        if not self.cleaning_finished and any(isinstance(agent, RobotLimpieza) for agent in self.schedule.agents):
+            self.start_time = time.time()
+            self.cleaning_finished = True
+
+        # Check if all robots have finished cleaning
+        if self.cleaning_finished and all(isinstance(agent, RobotLimpieza) and agent.celdas_visitadas.count(True) == self.num_celdas_sucias for agent in self.schedule.agents):
+            self.end_time = time.time()
         self.datacollector.collect(self)
         self.schedule.step()
 
@@ -401,5 +432,10 @@ def get_sucias(model: Model) -> int:
 def get_movimientos(agent: Agent) -> Dict[int, int]:
     if isinstance(agent, RobotLimpieza):
         return {agent.unique_id: agent.movimientos}
+    
+def get_movements(model: Model) -> int:
+    agents = model.schedule.agents
+    total_movements = sum(agent.movimientos for agent in agents if isinstance(agent, RobotLimpieza))
+    return total_movements
     # else:
     #    return 0
