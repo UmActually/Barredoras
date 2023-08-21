@@ -1,190 +1,223 @@
+from __future__ import annotations
+
+from typing import NamedTuple, Optional, Tuple, List, Dict
+
 from mesa.model import Model
 from mesa.agent import Agent
 from mesa.space import MultiGrid
 from mesa.time import SimultaneousActivation
 from mesa.datacollection import DataCollector
-
 import numpy as np
-import random
+
+
+NO_ROBOT_OVERLAP = True
+
+
+class Vecinos(NamedTuple):
+    celdas_sucias: List[Celda]
+    celdas_limpias: List[Celda]
+    estaciones_carga: List[EstacionCarga]
+    muebles: List[Mueble]
+
+    @property
+    def validos(self) -> List[Celda]:
+        return self.celdas_sucias + self.celdas_limpias + self.estaciones_carga
+
 
 class Celda(Agent):
-    def __init__(self, unique_id, model, suciedad: bool = False):
+    def __init__(self, unique_id, model, suciedad: bool = False) -> None:
         super().__init__(unique_id, model)
         self.sucia = suciedad
 
 
 class Mueble(Agent):
-    def __init__(self, unique_id, model):
+    def __init__(self, unique_id, model) -> None:
         super().__init__(unique_id, model)
 
 
 class EstacionCarga(Agent):
-    def __init__(self, unique_id, model):
+    def __init__(self, unique_id, model) -> None:
         super().__init__(unique_id, model)
 
     def step(self) -> None:
-        # Check if there is a robot in the same position
-        # robots = self.model.grid.get_cell_list_contents([self.pos])
-        # if len(robots) > 0:
-        #     for r in robots:
-        #         if isinstance(r, RobotLimpieza):
-        #             r.recarga()
         pass
-                    
+
 
 class RobotLimpieza(Agent):
-    def __init__(self, unique_id, model):
+    def __init__(self, unique_id: int, model: Habitacion) -> None:
         super().__init__(unique_id, model)
         self.sig_pos = None
         self.movimientos = 0
         self.carga = 100
         self.estaciones_carga = []
         self.mensajes = []
-        self.estado = 'limpiando' # limpiando, recargando
+        self.estado = 'limpiando'  # limpiando, recargando
         self.camino = []
+        self.celdas_visitadas = [False for _ in range(self.model.grid.width * self.model.grid.height)]
 
-    def limpiar_una_celda(self, lista_de_celdas_sucias):
-        celda_a_limpiar = self.random.choice(lista_de_celdas_sucias)
-        celda_a_limpiar.sucia = False
-        self.sig_pos = celda_a_limpiar.pos
+    def step(self) -> None:
+        if all(self.celdas_visitadas):
+            self.model.running = False
+            return
 
-    def seleccionar_nueva_pos(self, lista_de_vecinos):
-        self.sig_pos = self.random.choice(lista_de_vecinos).pos
-
-    @staticmethod
-    def buscar_celdas_sucia(lista_de_vecinos):
-        # #Opción 1
-        # return [vecino for vecino in lista_de_vecinos
-        #                 if isinstance(vecino, Celda) and vecino.sucia]
-        # #Opción 2
-        celdas_sucias = list()
-        for vecino in lista_de_vecinos:
-            if isinstance(vecino, Celda) and vecino.sucia:
-                celdas_sucias.append(vecino)
-        return celdas_sucias
-    
-    @staticmethod
-    def buscar_estacion_carga(lista_de_vecinos):
-        """
-        Busca las estaciones de carga en la lista de vecinos y las devuelve
-        en una lista.
-        """
-        return [vecino for vecino in lista_de_vecinos
-                        if isinstance(vecino, EstacionCarga)]
-
-    # def buscar_estacion_carga(estacionesCarga):
-
-    def step(self):
-        print(self.pos, self.carga, self.estado)
-        # Obtener vecinos 
-        vecinos = list(filter(
-            lambda vecino: not isinstance(vecino, Mueble | RobotLimpieza),
-            self.model.grid.get_neighbors(
-            self.pos, moore=True, include_center=False)))
-
-        # Buscar estaciones de carga
-        estaciones_carga = self.buscar_estacion_carga(vecinos)
+        # Buscar celdas válidas
+        vecinos = self.analizar_vecinos()
 
         # Enviar mensaje a otros robots con la posición de la estación de carga
-        if len(estaciones_carga) > 0:
-            for estacion in estaciones_carga:
-                if estacion not in self.estaciones_carga:
-                    self.broadcast(('estacion', estacion.pos))
-                    self.estaciones_carga.append(estacion.pos)
+        for estacion in vecinos.estaciones_carga:
+            if estacion not in self.estaciones_carga:
+                self.broadcast('estacion_descubierta', estacion.pos)
+                self.estaciones_carga.append(estacion.pos)
+
+        for mueble in vecinos.muebles:
+            self.broadcast('marcar_celda', mueble.pos)
 
         # Recibir mensajes
-        if len(self.mensajes) > 0:
-            mensaje, pos = self.mensajes.pop()
-            if mensaje == 'estacion' and pos not in self.estaciones_carga:
-                self.estaciones_carga.append(pos)
+        if self.mensajes:
+            for mensaje, contenido in self.mensajes:
+                if mensaje == 'estacion_descubierta' and contenido not in self.estaciones_carga:
+                    self.estaciones_carga.append(contenido)
+                elif mensaje == 'marcar_celda':
+                    self.celdas_visitadas[contenido[0] * self.model.grid.width + contenido[1]] = True
+            self.mensajes.clear()
 
         if self.estado == 'recargando':
-            if len(self.camino) > 0:
-                self.sig_pos = self.camino.pop()
+            if self.camino:
+                self.sig_pos = self.camino[-1]
                 return
             if self.carga >= 100:
                 self.estado = 'limpiando'
-                self.camino = []
-                self.sig_pos = self.seleccionar_nueva_pos(vecinos)
+                self.camino.clear()
+                self.seleccionar_nueva_pos(vecinos.validos)
                 return
             else:
                 self.sig_pos = self.pos
                 return
 
-        distancia_estacion = np.inf
+        # Camino más cercano a una estación de carga
+        if self.estaciones_carga:
+            camino = min(
+                self.calcula_caminos(self.estaciones_carga).values(),
+                key=len)
+        else:
+            camino = []
 
-        caminos = {}
-        camino = []
-        if len(self.estaciones_carga) > 0:
-            caminos = self.calcula_caminos(self.estaciones_carga)
-            for c in caminos.values():
-                if len(c) < distancia_estacion:
-                    distancia_estacion = len(c)
-                    camino = c
-        
-        print(distancia_estacion, len(self.estaciones_carga))
         # Va a la estacion de carga si la distancia es igual a la carga
-        if len(self.estaciones_carga) and self.carga - distancia_estacion < 10:
-            print('recargando')
+        if self.estaciones_carga and self.carga - len(camino) < 10:
             # Ir a estacion de carga
             self.estado = 'recargando'
             self.camino = camino
-            self.sig_pos = camino.pop()
+            self.sig_pos = camino[-1]
             return
-        
-        celdas_sucias = self.buscar_celdas_sucia(vecinos)
 
-        if len(celdas_sucias) == 0:
-            self.seleccionar_nueva_pos(vecinos)
+        if vecinos.celdas_sucias:
+            self.limpiar_una_celda(vecinos.celdas_sucias)
         else:
-            self.limpiar_una_celda(celdas_sucias)
+            self.seleccionar_nueva_pos(vecinos.validos)
 
-    def advance(self):
-        if self.pos != self.sig_pos:
+    def advance(self) -> None:
+        tener_piedad = False
+
+        if NO_ROBOT_OVERLAP:
+            for agent in self.model.schedule.agents:
+                if (isinstance(agent, RobotLimpieza) and agent != self
+                        and agent.sig_pos == self.sig_pos
+                        and agent.sig_pos != self.pos
+                        and agent.unique_id > self.unique_id):
+                    # Que no se le acabe la pila esperando a otro robot que no se mueve
+                    tener_piedad = bool(self.camino)
+
+        agentes_aqui = self.model.grid.get_cell_list_contents([self.pos])
+        if agentes_aqui and any(isinstance(agente, EstacionCarga) for agente in agentes_aqui):
+            self.recarga()
+        elif self.carga > 0 and not tener_piedad:
+            self.carga -= 1
+        if self.camino and not tener_piedad:
+            self.camino.pop()
+        if self.sig_pos and self.sig_pos != self.pos:
             self.movimientos += 1
-        
-        estacion = self.model.grid.get_cell_list_contents([self.pos])
-        if len(estacion) > 0:
-            for e in estacion:
-                if isinstance(e, EstacionCarga):
-                    self.recarga()
-                    break
-            else:
-                if self.carga > 0:
-                    self.carga -= 1
-            if self.sig_pos and self.sig_pos != self.pos:
-                self.model.grid.move_agent(self, self.sig_pos)
-            # self.model.grid.move_agent(self, self.sig_pos)
+            self.model.grid.move_agent(self, self.sig_pos)
+            self.broadcast('marcar_celda', self.pos)
 
-    def recarga(self):
+    def analizar_vecinos(self) -> Vecinos:
+        vecinos = {
+            'celdas_sucias': [],
+            'celdas_limpias': [],
+            'estaciones_carga': [],
+            'muebles': []
+        }
+
+        for celda in self.model.grid.get_neighbors(
+                self.pos, moore=True, include_center=False):
+            if isinstance(celda, RobotLimpieza):
+                continue
+            if isinstance(celda, Celda):
+                if celda.sucia:
+                    vecinos['celdas_sucias'].append(celda)
+                else:
+                    vecinos['celdas_limpias'].append(celda)
+            elif isinstance(celda, EstacionCarga):
+                vecinos['estaciones_carga'].append(celda)
+            elif isinstance(celda, Mueble):
+                vecinos['muebles'].append(celda)
+
+        return Vecinos(**vecinos)
+
+    def celda_ya_visitada(self, pos: Tuple[int, int]) -> bool:
+        try:
+            return self.celdas_visitadas[pos[0] * self.model.grid.width + pos[1]]
+        except IndexError:
+            # No sé por qué, pero ya me falló una vez
+            return False
+
+    def limpiar_una_celda(self, celdas) -> None:
+        celda_a_limpiar = self.random.choice(celdas)
+        celda_a_limpiar.sucia = False
+        self.sig_pos = celda_a_limpiar.pos
+
+    def seleccionar_nueva_pos(self, celdas) -> None:
+        celdas_no_visitadas = [
+            celda for celda in celdas
+            if not self.celda_ya_visitada(celda.pos)]
+
+        if celdas_no_visitadas:
+            self.sig_pos = self.random.choice(celdas_no_visitadas).pos
+        else:
+            self.sig_pos = self.random.choice(celdas).pos
+
+    def recarga(self) -> None:
         if self.carga >= 100:
             return
-        else:
-            self.carga += 25
-        
-    def enviar_mensaje(self, mensaje):
-        self.mensajes.append(mensaje)
+        self.carga += min(100 - self.carga, 25)
 
-    def broadcast(self, mensaje):
+    def enviar_mensaje(self, mensaje, contenido) -> None:
+        self.mensajes.append((mensaje, contenido))
+
+    def broadcast(self, mensaje, contenido) -> None:
         """
         Envía un mensaje a todos los robots.
         """
         for robot in self.model.schedule.agents:
             if isinstance(robot, RobotLimpieza):
-                robot.enviar_mensaje(mensaje)
+                robot.enviar_mensaje(mensaje, contenido)
 
-    def casilla_menor_costo(self, posiciones_no_visitadas, costos):
-        costo_actual = np.inf
-        pos = None
+    @staticmethod
+    def casilla_menor_costo(posiciones_no_visitadas, costos) -> Optional[Tuple[int, int]]:
+        if not posiciones_no_visitadas:
+            return None
+        return min(posiciones_no_visitadas, key=lambda pos: costos[pos])
 
-        for posicion in posiciones_no_visitadas:
-            if costos[posicion] < costo_actual:
-                costo_actual = costos[posicion]
-                pos = posicion
+        # costo_actual = np.inf
+        # pos = None
+        #
+        # for posicion in posiciones_no_visitadas:
+        #     if costos[posicion] < costo_actual:
+        #         costo_actual = costos[posicion]
+        #         pos = posicion
+        #
+        # return pos
 
-        return pos
-
-    def calcula_caminos(self, posiciones):
+    def calcula_caminos(self, posiciones) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
         """
         Calcula el camino más corto desde la posición actual hasta la posición
         indicada. Devuelve una lista de posiciones que representan el camino.
@@ -197,7 +230,6 @@ class RobotLimpieza(Agent):
         pos_actual = self.pos
 
         while len(posiciones_no_visitadas) > 0:
-            # print(pos_actual)
             vecinos = self.model.grid.get_neighbors(
                 pos_actual, moore=True, include_center=False)
             for vecino in vecinos:
@@ -206,16 +238,16 @@ class RobotLimpieza(Agent):
                 if costos[vecino.pos] > costos[pos_actual] + 1:
                     costos[vecino.pos] = costos[pos_actual] + 1
             posiciones_no_visitadas.remove(pos_actual)
-            
+
             if pos_actual in posiciones2:
                 posiciones2.remove(pos_actual)
-                
+
                 if len(posiciones2) == 0:
                     break
             pos_actual = self.casilla_menor_costo(posiciones_no_visitadas, costos)
             if pos_actual is None:
                 break
-        
+
         caminos = {}
 
         for pos in posiciones:
@@ -235,54 +267,55 @@ class RobotLimpieza(Agent):
 
 
 class Habitacion(Model):
-    def __init__(self, M: int, N: int,
-                 num_agentes: int = 5,
-                 porc_celdas_sucias: float = 0.6,
-                 porc_muebles: float = 0.1,
-                 modo_pos_inicial: str = 'Fija',
-                 ):
+    def __init__(
+            self, rows: int, cols: int, num_agentes: int = 5,
+            porc_celdas_sucias: float = 0.6, porc_muebles: float = 0.1,
+            modo_pos_inicial: str = 'Fija') -> None:
+        super().__init__()
 
         self.num_agentes = num_agentes
         self.porc_celdas_sucias = porc_celdas_sucias
         self.porc_muebles = porc_muebles
 
-        self.grid = MultiGrid(M, N, False)
+        self.grid = MultiGrid(rows, cols, False)
         self.schedule = SimultaneousActivation(self)
 
         posiciones_disponibles = [pos for _, pos in self.grid.coord_iter()]
         self.random.shuffle(posiciones_disponibles)
-        
+
         #                Top Left  Top Right  Bot Left  Bot Right
         estaciones_creadas = [False, False, False, False]
 
         for id_, pos in enumerate(posiciones_disponibles):
+            # Esto es para que PyCharm no llore
+            pos: Tuple[int, int] = pos
             if all(estaciones_creadas):
                 break
             row, col = pos
-            if row < M / 2 and col < N / 2 and not estaciones_creadas[0]:
+            if row < rows / 2 and col < cols / 2 and not estaciones_creadas[0]:
                 estacion_carga = EstacionCarga(int(f"{num_agentes}{id_}") + 1, self)
                 self.grid.place_agent(estacion_carga, pos)
                 self.schedule.add(estacion_carga)
                 estaciones_creadas[0] = True
                 posiciones_disponibles.remove(pos)
-            elif row < M / 2 and col >= N / 2 and not estaciones_creadas[1]:
+            elif row < rows / 2 and col >= cols / 2 and not estaciones_creadas[1]:
                 estacion_carga = EstacionCarga(int(f"{num_agentes}{id_}") + 1, self)
                 self.grid.place_agent(estacion_carga, pos)
                 estaciones_creadas[1] = True
                 posiciones_disponibles.remove(pos)
-            elif row >= M / 2 and col < N / 2 and not estaciones_creadas[2]:
+            elif row >= rows / 2 and col < cols / 2 and not estaciones_creadas[2]:
                 estacion_carga = EstacionCarga(int(f"{num_agentes}{id_}") + 1, self)
                 self.grid.place_agent(estacion_carga, pos)
                 estaciones_creadas[2] = True
                 posiciones_disponibles.remove(pos)
-            elif row >= M / 2 and col >= N / 2 and not estaciones_creadas[3]:
+            elif row >= rows / 2 and col >= cols / 2 and not estaciones_creadas[3]:
                 estacion_carga = EstacionCarga(int(f"{num_agentes}{id_}") + 1, self)
                 self.grid.place_agent(estacion_carga, pos)
                 estaciones_creadas[3] = True
                 posiciones_disponibles.remove(pos)
 
         # Posicionamiento de muebles
-        num_muebles = int(M * N * porc_muebles)
+        num_muebles = int(rows * cols * porc_muebles)
         posiciones_muebles = self.random.sample(posiciones_disponibles, k=num_muebles)
 
         for id_, pos in enumerate(posiciones_muebles):
@@ -291,7 +324,7 @@ class Habitacion(Model):
             posiciones_disponibles.remove(pos)
 
         # Posicionamiento de celdas sucias
-        self.num_celdas_sucias = int(M * N * porc_celdas_sucias)
+        self.num_celdas_sucias = int(rows * cols * porc_celdas_sucias)
         posiciones_celdas_sucias = self.random.sample(
             posiciones_disponibles, k=self.num_celdas_sucias)
 
@@ -300,16 +333,15 @@ class Habitacion(Model):
             celda = Celda(int(f"{num_agentes}{id_}") + 1, self, suciedad)
             self.grid.place_agent(celda, pos)
 
-
         # Posicionamiento de agentes robot
         if modo_pos_inicial == 'Aleatoria':
             pos_inicial_robots = self.random.sample(posiciones_disponibles, k=num_agentes)
         else:  # 'Fija'
             pos_inicial_robots = [(1, 1)] * num_agentes
 
-        for id in range(num_agentes):
-            robot = RobotLimpieza(id, self)
-            self.grid.place_agent(robot, pos_inicial_robots[id])
+        for id_ in range(num_agentes):
+            robot = RobotLimpieza(id_, self)
+            self.grid.place_agent(robot, pos_inicial_robots[id_])
             self.schedule.add(robot)
 
         self.datacollector = DataCollector(
@@ -317,12 +349,11 @@ class Habitacion(Model):
                              "CeldasSucias": get_sucias},
         )
 
-    def step(self):
+    def step(self) -> None:
         self.datacollector.collect(self)
-
         self.schedule.step()
 
-    def todoLimpio(self):
+    def todo_limpio(self) -> bool:
         for (content, x, y) in self.grid.coord_iter():
             for obj in content:
                 if isinstance(obj, Celda) and obj.sucia:
@@ -348,7 +379,7 @@ def get_grid(model: Model) -> np.ndarray:
     return grid
 
 
-def get_cargas(model: Model):
+def get_cargas(model: Model) -> list[tuple[int, int]]:
     return [(agent.unique_id, agent.carga) for agent in model.schedule.agents if isinstance(agent, RobotLimpieza)]
 
 
@@ -367,9 +398,8 @@ def get_sucias(model: Model) -> int:
     return sum_sucias / model.num_celdas_sucias
 
 
-def get_movimientos(agent: Agent) -> dict:
+def get_movimientos(agent: Agent) -> Dict[int, int]:
     if isinstance(agent, RobotLimpieza):
         return {agent.unique_id: agent.movimientos}
     # else:
     #    return 0
-

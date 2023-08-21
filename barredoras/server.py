@@ -65,8 +65,8 @@ model_params = {
         ["Fija", "Aleatoria"],
         "Seleciona la forma se posicionan los robots"
     ),
-    "M": 20,
-    "N": 20,
+    "rows": 20,
+    "cols": 20,
 }
 
 server = mesa.visualization.ModularServer(
